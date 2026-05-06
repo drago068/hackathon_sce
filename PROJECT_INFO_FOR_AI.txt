@@ -1,0 +1,283 @@
+================================================================================
+PROJECT: Vernacular AI Tutor
+VERSION: 2.0 (Ollama + Local LLM upgrade)
+LAST UPDATED: 2026-03-17
+================================================================================
+
+WHAT IS THIS PROJECT?
+─────────────────────
+An AI-powered adaptive learning system that:
+1. Takes any PDF (textbook, notes, research paper)
+2. Automatically generates 3-level quiz questions (easy / medium / conceptual)
+3. Evaluates student answers with Correct / Partial / Wrong verdicts
+4. Detects the specific weak concept the student missed
+5. Retrieves the most relevant content from the PDF using FAISS RAG
+6. Teaches the weak concept in simple Tamil (vernacular language)
+7. Asks a follow-up question to verify the student improved
+
+ONE-LINE PITCH
+──────────────
+"We turn any PDF into a smart AI tutor that teaches you in your own language
+ based on your mistakes."
+
+================================================================================
+FILE STRUCTURE
+================================================================================
+
+d:/hackathon/
+├── app.py               ← Streamlit frontend (all UI logic, 6-phase state machine)
+├── llm_service.py       ← LLM backend (Ollama primary, OpenRouter fallback)
+├── rag_engine.py        ← PDF chunking + FAISS vector store + retrieval
+├── pdf_processor.py     ← PyMuPDF text extraction from uploaded PDFs
+├── requirements.txt     ← Python dependencies
+├── .env                 ← API keys (OPENROUTER_API_KEY)
+├── project_info.txt     ← Original project description
+└── PROJECT_INFO_FOR_AI.txt  ← THIS FILE (AI-readable full project doc)
+
+================================================================================
+MODULE DETAILS
+================================================================================
+
+── 1. pdf_processor.py ─────────────────────────────────────────────────────
+PURPOSE : Extract plain text from uploaded PDF files
+LIBRARY : PyMuPDF (fitz)
+FUNCTION: extract_text_from_pdf(pdf_path: str) -> str
+  - Opens PDF, iterates all pages, concatenates text
+  - Returns empty string on failure (never throws)
+
+── 2. rag_engine.py ────────────────────────────────────────────────────────
+PURPOSE : Text chunking, embedding, vector storage, and retrieval
+
+EMBEDDING MODEL : sentence-transformers/all-MiniLM-L6-v2 (local, CPU)
+  - Lightweight, fast, high-quality semantic embeddings
+  - Normalized for cosine similarity accuracy
+
+CHUNKING (RecursiveCharacterTextSplitter):
+  - CHUNK_SIZE    = 1800 chars  (~360 words)
+  - CHUNK_OVERLAP = 300 chars   (~60 words)
+  - Separators: paragraph → newline → sentence → word
+  - Rationale: 300-500 word chunks = optimal RAG accuracy
+
+VECTOR STORE : FAISS (offline, no server needed)
+  - from_texts() to index all chunks
+  - similarity_search(query, k=3) for retrieval
+
+KEY METHODS:
+  process_text_and_index(text)     → indexes PDF text into FAISS
+  retrieve_relevant_chunks(query)  → top-3 semantically similar chunks
+  get_random_chunk()               → random chunk for question generation
+  get_stats()                      → {"total_chunks": N, "indexed": bool}
+
+── 3. llm_service.py ───────────────────────────────────────────────────────
+PURPOSE : All LLM interactions
+
+PRIMARY LLM : Ollama (local server at http://localhost:11434)
+  - Model: qwen2.5:3b
+  - Endpoint: POST /api/generate  (stream: False)
+  - Timeout: 120 seconds
+  - Detection: GET /api/tags (3s timeout)
+
+FALLBACK LLM : OpenRouter (if Ollama unavailable)
+  - Model: mistralai/mistral-7b-instruct:free
+  - API Base: https://openrouter.ai/api/v1
+  - Key: OPENROUTER_API_KEY from .env
+
+KEY METHODS:
+
+  generate_questions(context_chunk) → dict
+    Input:  ~360-word text chunk from PDF
+    Prompt: Ask LLM to generate 3 questions in JSON format:
+            { "easy": "...", "medium": "...", "conceptual": "..." }
+    Output: {"easy": str, "medium": str, "conceptual": str}
+    Parse:  JSON extraction with regex fallback
+
+  evaluate_answer(question, user_answer, context) → dict
+    Input:  The question, student's text answer, original context chunk
+    Prompt: Ask LLM to evaluate with structured JSON output:
+            { "verdict": "Correct|Partial|Wrong",
+              "weak_concept": "...",
+              "explanation": "..." }
+    Output: {verdict, is_correct, weak_concept, explanation}
+
+  explain_in_tamil(weak_concept, context) → str
+    Input:  The detected weak concept + RAG-retrieved content
+    Prompt: Tamil-language prompt asking for simple explanation + example
+    Output: Tamil explanation text
+
+  generate_followup_question(weak_concept, context) → str
+    Input:  Weak concept + original chunk (first 800 chars)
+    Prompt: Generate ONE targeted question to test improvement
+    Output: Single question string
+
+  evaluate_followup(question, user_answer, weak_concept) → dict
+    Input:  Follow-up Q, student answer, weak concept name
+    Prompt: Did the student improve?  JSON: {improved: bool, feedback: str}
+    Output: {improved: bool, feedback: str}
+
+  get_backend_info() → str
+    Returns human-readable string describing active LLM backend
+
+── 4. app.py ───────────────────────────────────────────────────────────────
+PURPOSE : Streamlit frontend with 6-phase state machine
+
+UI DESIGN:
+  - Dark glassmorphism theme (linear-gradient background)
+  - Google Fonts: Inter
+  - Card components with backdrop-filter blur
+  - Color-coded verdict badges (green/orange/red)
+  - Difficulty chips (green=easy, orange=medium, blue=conceptual)
+  - Score dashboard (Correct / Total / Accuracy / Chunks)
+
+PHASE STATE MACHINE:
+  Phase 1 — "generate"
+    → Click "Generate 3 Questions" → RAG picks random chunk → LLM generates 3 Qs
+  Phase 2 — "answer"
+    → User selects difficulty (easy/medium/conceptual) → sees question → types answer
+  Phase 3 — "evaluated"
+    → Shows Correct/Partial/Wrong verdict + weak concept + explanation
+    → If correct: → Phase 1
+    → If wrong/partial: → Phase 4 (Tamil teaching)
+  Phase 4 — "teaching"
+    → RAG retrieves top-3 chunks for the weak concept
+    → LLM explains in Tamil using retrieved content
+    → User can trigger follow-up
+  Phase 5 — "followup"
+    → LLM generates a targeted follow-up question
+    → Student answers
+  Phase 6 — "followup_result"
+    → LLM evaluates improvement
+    → Shows result → back to Phase 1
+
+SESSION STATE KEYS:
+  rag_engine, llm_service          # service instances
+  pdf_processed                    # bool
+  questions                        # {easy, medium, conceptual}
+  current_question                 # str (selected Q)
+  current_difficulty               # easy | medium | conceptual
+  current_context                  # str (chunk from which Q was generated)
+  eval_result                      # {verdict, is_correct, weak_concept, explanation}
+  tamil_explanation                # str
+  followup_question                # str
+  phase                            # generate|answer|evaluated|teaching|followup|followup_result
+  score, total_asked               # int counters
+  history                          # list of {question, difficulty, verdict, answer}
+
+================================================================================
+LLM PROMPT DESIGNS
+================================================================================
+
+[Question Generation Prompt]
+"Based on the text below, generate exactly 3 questions...
+ Respond ONLY in this JSON format:
+ { 'easy': '...', 'medium': '...', 'conceptual': '...' }"
+
+[Answer Evaluation Prompt]
+"Evaluate the student's answer based on the reference context above.
+ Respond ONLY in this JSON format:
+ { 'verdict': 'Correct|Partial|Wrong',
+   'weak_concept': '...',
+   'explanation': '...' }"
+
+[Tamil Teaching Prompt] (written partly in Tamil)
+"நீங்கள் ஒரு பொறுமையான ஆசிரியர்... (You are a patient teacher)
+ இந்த கருத்தை மிகவும் எளிமையான தமிழில்... (Explain this in simple Tamil)
+ Explain this concept clearly in simple Tamil with a real-life example"
+
+[Follow-up Generation Prompt]
+"Generate ONE short follow-up question to check if the student now
+ understands '{weak_concept}'"
+
+[Follow-up Evaluation Prompt]
+"Did the student show improvement in understanding '{weak_concept}'?
+ { 'improved': true|false, 'feedback': '...' }"
+
+================================================================================
+HOW TO RUN
+================================================================================
+
+PREREQUISITES:
+  1. Python 3.9+
+  2. Ollama installed: https://ollama.ai/download
+  3. Qwen model pulled: ollama pull qwen2.5:3b
+
+SETUP:
+  cd d:\hackathon
+  python -m venv venv
+  venv\Scripts\activate
+  pip install -r requirements.txt
+
+RUN:
+  ollama serve                          # start Ollama server (separate terminal)
+  streamlit run app.py                  # start Streamlit app
+
+ACCESS:
+  http://localhost:8501
+
+FALLBACK (no Ollama):
+  Set OPENROUTER_API_KEY in .env file
+  The app will automatically detect Ollama is unavailable and use OpenRouter
+
+================================================================================
+TECH STACK SUMMARY
+================================================================================
+
+Layer           Tool/Library              Version Notes
+──────────────  ────────────────────────  ──────────────────────────────────
+Frontend        Streamlit                 Latest stable
+PDF Extraction  PyMuPDF (fitz)            Latest stable
+Text Splitting  LangChain                 RecursiveCharacterTextSplitter
+Embeddings      sentence-transformers     all-MiniLM-L6-v2 (80MB, CPU)
+Vector DB       FAISS (faiss-cpu)         Local, no server needed
+Primary LLM     Ollama → qwen2.5:3b       Local inference, ~2GB RAM
+Fallback LLM    OpenRouter → Mistral-7B   Free tier, internet required
+Language        Tamil (vernacular)        Native prompt in Tamil script
+UI Fonts        Google Fonts — Inter       Sans-serif, modern
+
+================================================================================
+INNOVATION HIGHLIGHTS
+================================================================================
+
+1. DUAL LLM BACKEND: Automatically detects if Ollama is running.
+   Uses local Qwen2.5:3b for offline/private use, falls back to
+   cloud (OpenRouter/Mistral) if unavailable. Zero config needed.
+
+2. 3-LEVEL QUESTION GENERATION: Every question set has:
+   - Easy   : factual recall (who/what/when)
+   - Medium : application and understanding
+   - Conceptual: deep reasoning and "why"
+
+3. STRUCTURED EVALUATION: Returns Correct/Partial/Wrong + specific
+   weak concept name — not just binary pass/fail.
+
+4. RAG-BACKED TEACHING: Tamil explanations use retrieved chunks
+   (not just the original chunk) — retrieval is targeted specifically
+   to the student's identified weak concept.
+
+5. FEEDBACK LOOP: After Tamil teaching, a targeted follow-up question
+   tests whether the student actually improved.
+
+6. VERNACULAR SUPPORT: Tamil prompts are written in Tamil script,
+   ensuring the LLM understands intent and responds in Tamil.
+
+================================================================================
+KNOWN LIMITATIONS & FUTURE IMPROVEMENTS
+================================================================================
+
+CURRENT LIMITATIONS:
+- Speech input/output not implemented (whisper/gTTS planned)
+- Only Tamil supported (multi-language expansion planned)
+- No persistent user profiles or progress tracking
+- FAISS index is in-memory only (not saved to disk)
+
+FUTURE ENHANCEMENTS:
+- Voice-based Q&A (Whisper STT + gTTS TTS)
+- Progress dashboard with charts (weak area heatmap)
+- Save/load FAISS index to disk
+- Multi-language (Hindi, Telugu, Kannada, Malayalam)
+- Emotion detection from answer patterns
+- LangChain agents for more complex reasoning chains
+- Docker packaging for deployment
+
+================================================================================
+END OF DOCUMENT
+================================================================================

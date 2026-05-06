@@ -1,0 +1,273 @@
+PROJECT: Vernacular AI Tutor
+LAST UPDATED: 2026-03-18
+
+OVERVIEW
+This project is a Streamlit-based AI study tutor for uploaded PDF material.
+It combines local document retrieval (RAG), adaptive quiz generation, answer
+evaluation, reteaching, follow-up checks, and multilingual explanation modes.
+
+The app is designed to:
+- turn any text-based PDF into a study assistant
+- ask quiz questions from the uploaded material
+- judge answers as Correct / Partial / Wrong
+- detect the weak concept behind a mistake
+- explain the concept in the selected language
+- ask a follow-up question to confirm improvement
+- support chat-style Q&A over the same uploaded material
+
+WHAT THE PROJECT USES AND WHY
+1. Streamlit
+- Used for the web UI.
+- Chosen because it is fast to build with and works well for stateful AI demos.
+
+2. PyMuPDF (fitz)
+- Used to extract raw text from uploaded PDF files.
+- Chosen because it is lightweight and reliable for text-based PDFs.
+
+3. LangChain text splitter
+- Used to break extracted PDF text into manageable chunks.
+- Chosen because chunking improves retrieval quality and keeps prompts smaller.
+
+4. Sentence Transformers embeddings
+- Model: all-MiniLM-L6-v2
+- Used to convert chunks into embeddings for semantic search.
+- Chosen because it is small, fast, and works locally on CPU.
+
+5. FAISS
+- Used as the local vector store.
+- Chosen because it is fast, offline, and does not need a separate server.
+
+6. Ollama
+- Default local LLM backend when available.
+- Current local model: qwen2.5:3b
+- Chosen because it allows private/offline inference on the user's machine.
+
+7. OpenRouter
+- Optional cloud backend when selected or when local backend is unavailable.
+- Candidate models are rotated if one endpoint fails.
+- Chosen to provide cloud fallback and backend flexibility.
+
+8. Requests
+- Used for direct HTTP calls to Ollama.
+- Chosen because the Ollama integration here is simple and lightweight.
+
+9. LangChain OpenAI wrapper
+- Used for OpenRouter chat completion access.
+- Chosen because OpenRouter exposes an OpenAI-compatible API.
+
+10. python-dotenv
+- Used to load environment variables such as OPENROUTER_API_KEY.
+- Chosen to keep credentials outside hardcoded app logic.
+
+CURRENT FILES
+- app.py
+  Main Streamlit application.
+  Handles UI, theme switching, chat flow, quiz flow, session state, backend
+  selection, language selection, and rendering.
+
+- llm_service.py
+  Central LLM service layer.
+  Handles backend selection, Ollama/OpenRouter calls, question generation,
+  answer evaluation, explanation generation, Tanglish conversion, follow-up
+  generation, and follow-up grading.
+
+- rag_engine.py
+  Retrieval layer.
+  Splits PDF text into chunks, embeds them, stores them in FAISS, and retrieves
+  relevant chunks for chat answers and reteaching.
+
+- pdf_processor.py
+  PDF text extraction helper using PyMuPDF.
+
+- requirements.txt
+  Python dependencies used by the project.
+
+- project_info.txt
+  Older project notes.
+
+- PROJECT_INFO_FOR_AI.txt
+  Current AI-readable project summary.
+
+- AI_INFO_FOR_AI.txt
+  Alias copy of the same current project summary for easier discovery.
+
+HOW THE APP WORKS
+1. PDF upload
+- The user uploads a PDF in the sidebar.
+- app.py stores it temporarily and calls pdf_processor.extract_text_from_pdf().
+
+2. Indexing
+- app.py sends the extracted text to rag_engine.process_text_and_index().
+- rag_engine splits text with RecursiveCharacterTextSplitter.
+- embeddings are generated locally with all-MiniLM-L6-v2.
+- FAISS stores the embeddings for retrieval.
+
+3. Chat mode
+- The user asks a question about the PDF.
+- rag_engine retrieves the most relevant chunks.
+- llm_service generates the answer from the retrieved context.
+- If Tanglish is selected, the answer is generated and then rewritten into
+  Tanglish.
+
+4. Quiz mode
+- A random chunk is selected from the indexed PDF.
+- llm_service generates easy, medium, and conceptual questions.
+- The user answers one question.
+- llm_service evaluates the answer and returns:
+  - verdict
+  - is_correct
+  - weak_concept
+  - explanation
+
+5. Adaptive reteaching
+- If the answer is wrong or partial, the weak concept is used as a retrieval
+  query.
+- relevant chunks are fetched again from FAISS
+- llm_service explains the concept in the currently selected language
+
+6. Follow-up check
+- llm_service creates one follow-up question
+- the user answers it
+- llm_service checks whether understanding improved
+
+CURRENT USER-FACING FEATURES
+- PDF-based Q&A chat
+- Adaptive quiz flow
+- Correct / Partial / Wrong grading
+- Weak concept detection
+- Follow-up question generation
+- Explanation languages:
+  - English
+  - Tanglish
+  - Tamil
+  - Hindi
+- Theme switching:
+  - dark
+  - light
+- Backend switching:
+  - Auto
+  - Ollama
+  - OpenRouter
+
+SESSION STATE DESIGN IN app.py
+Important session keys include:
+- rag_engine
+- llm_service
+- llm_backend_pref
+- theme_mode
+- pdf_processed
+- language
+- chat_history
+- chat_mode
+- chat_pending_q
+- chat_pending_diff
+- chat_pending_ctx
+- chat_pending_weak
+- chat_balloon_fired
+- quiz_phase
+- quiz_questions
+- quiz_question
+- quiz_difficulty
+- quiz_context
+- quiz_eval
+- quiz_explanation
+- quiz_followup_q
+- quiz_followup_res
+- quiz_balloon_fired
+- score
+- total_asked
+- history
+
+LLM BACKEND LOGIC
+Auto mode:
+- use Ollama first if the local Ollama server is reachable
+- otherwise use OpenRouter if OPENROUTER_API_KEY exists
+
+Forced Ollama mode:
+- use local Ollama only
+
+Forced OpenRouter mode:
+- use OpenRouter only
+
+OpenRouter failover:
+- if a selected OpenRouter model has no endpoint, llm_service rotates to the
+  next candidate model
+
+CURRENT OPENROUTER CANDIDATE MODELS
+- openrouter/free
+- openai/gpt-oss-120b:free
+- meta-llama/llama-3.2-3b-instruct:free
+
+CURRENT LOCAL MODEL
+- qwen2.5:3b via Ollama
+
+TANGLISH HANDLING
+Tanglish is treated specially because small models often drift into bad
+transliteration or Hindi-like text.
+
+Current approach:
+- generate a grounded answer first
+- convert or rewrite into Tanglish
+- clean common bad tokens
+- reject obvious Hindi drift patterns
+- fall back to a deterministic rewrite if needed
+
+QUIZ GRADING RULES
+The evaluator supports answers in:
+- English
+- Tanglish
+- Tamil
+- Hindi
+
+Non-answers such as:
+- i don't know
+- idk
+- pass
+- skip
+- theriyala
+- pata nahi
+are forced to Wrong before or after model output so they cannot be marked
+correct.
+
+TECH STACK
+- Python
+- Streamlit
+- PyMuPDF
+- FAISS (faiss-cpu)
+- LangChain
+- langchain-community
+- langchain-openai
+- langchain-text-splitters
+- langchain-huggingface
+- sentence-transformers
+- requests
+- python-dotenv
+- Ollama
+- OpenRouter
+
+WHY THIS STACK FITS THE PROJECT
+- local-first: works on a laptop with a local model
+- fallback-ready: can move to cloud when needed
+- RAG-friendly: chunking + embeddings + FAISS are enough for a lightweight PDF tutor
+- hackathon-friendly: simple deployment, fast iteration, minimal infrastructure
+- multilingual UI flow: easy to add language-specific prompting and translation layers
+
+KNOWN LIMITATIONS
+- PDF processing currently uses a fixed temp filename in app.py
+- FAISS index is in-memory only and is not persisted to disk
+- app.py still contains a lot of combined UI and flow logic in one file
+- some older source comments still contain mojibake, even though visible UI text
+  has been gradually cleaned
+- Tanglish quality depends heavily on backend/model quality
+
+HOW TO RUN
+1. Create and activate a virtual environment
+2. Install dependencies from requirements.txt
+3. Start Ollama if using local backend
+4. Run:
+   streamlit run app.py
+
+OPTIONAL ENVIRONMENT VARIABLE
+- OPENROUTER_API_KEY
+
+END
